@@ -49,40 +49,69 @@ order by 3 desc
 
 ----Who is our best customer (this could be best answered with RFM)
 
+-- Drop the temporary table if it exists
+DROP TABLE IF EXISTS #rfm;
 
-DROP TABLE IF EXISTS #rfm
-;with rfm as 
-(
-	select 
-		CUSTOMERNAME, 
-		sum(sales) MonetaryValue,
-		avg(sales) AvgMonetaryValue,
-		count(ORDERNUMBER) Frequency,
-		max(ORDERDATE) last_order_date,
-		(select max(ORDERDATE) from [dbo].[sales_data_sample]) max_order_date,
-		DATEDIFF(DD, max(ORDERDATE), (select max(ORDERDATE) from [dbo].[sales_data_sample])) Recency
-	from [PortfolioDB].[dbo].[sales_data_sample]
-	group by CUSTOMERNAME
+-- Define the RFM CTE
+WITH RFM AS (
+    SELECT 
+        customername,
+        MAX(orderdate) AS last_purchase,
+        COUNT(ordernumber) AS frequency,
+        SUM(sales) AS monetary,
+        AVG(sales) AS average_sales,
+        (SELECT MAX(orderdate) FROM [dbo].[sales_data_sample]) AS max_order_date
+    FROM [dbo].[sales_data_sample]
+    GROUP BY customername
 ),
-rfm_calc as
-(
 
-	select r.*,
-		NTILE(4) OVER (order by Recency desc) rfm_recency,
-		NTILE(4) OVER (order by Frequency) rfm_frequency,
-		NTILE(4) OVER (order by MonetaryValue) rfm_monetary
-	from rfm r
+-- Define the RFM_CALC CTE
+RFM_CALC AS (
+    SELECT 
+        customername,
+        last_purchase,
+        DATEDIFF(dd, last_purchase, max_order_date) AS recency,
+        frequency,
+        monetary,
+        average_sales
+    FROM RFM
+),
+
+-- Define the RFM_NTE CTE
+RFM_NTE AS (
+    SELECT 
+        customername,
+        last_purchase,
+        recency,
+        frequency,
+        monetary,
+        average_sales,
+        NTILE(4) OVER (ORDER BY recency) AS rfm_recency, -- 4 is the most recent
+        NTILE(4) OVER (ORDER BY frequency DESC) AS rfm_frequency, -- 1 is the most frequent
+        NTILE(4) OVER (ORDER BY monetary) AS rfm_monetary -- 1 is the least spender
+    FROM RFM_CALC
 )
-select 
-	c.*, rfm_recency+ rfm_frequency+ rfm_monetary as rfm_cell,
-	cast(rfm_recency as varchar) + cast(rfm_frequency as varchar) + cast(rfm_monetary  as varchar)rfm_cell_string
-into #rfm
-from rfm_calc c
+
+-- Final query to select and insert into the temporary table
+SELECT 
+    customername,
+    last_purchase,
+    recency,
+    frequency,
+    monetary,
+    average_sales,
+    rfm_recency,
+    rfm_frequency,
+    rfm_monetary,
+    rfm_recency + rfm_frequency + rfm_monetary AS rfm_cell,
+    CAST(rfm_recency AS VARCHAR) + CAST(rfm_frequency AS VARCHAR) + CAST(rfm_monetary AS VARCHAR) AS rfm_cell_string
+INTO #rfm
+FROM RFM_NTE;
 
 select CUSTOMERNAME , rfm_recency, rfm_frequency, rfm_monetary,
 	case 
 		when rfm_cell_string in (111, 112 , 121, 122, 123, 132, 211, 212, 114, 141) then 'lost_customers'  --lost customers
-		when rfm_cell_string in (133, 134, 143, 244, 334, 343, 344, 144) then 'slipping away, cannot lose' -- (Big spenders who haven’t purchased lately) slipping away
+		when rfm_cell_string in (133, 134, 143, 244, 334, 343, 344, 144) then 'slipping away, cannot lose' -- (Big spenders who havenâ€™t purchased lately) slipping away
 		when rfm_cell_string in (311, 411, 331) then 'new customers'
 		when rfm_cell_string in (222, 223, 233, 322) then 'potential churners'
 		when rfm_cell_string in (323, 333,321, 422, 332, 432) then 'active' --(Customers who buy often & recently, but at low price points)
